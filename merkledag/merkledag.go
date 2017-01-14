@@ -2,8 +2,10 @@
 package merkledag
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -11,17 +13,23 @@ import (
 	offline "github.com/ipfs/go-ipfs/exchange/offline"
 	blocks "gx/ipfs/QmXxGS5QsUxpR3iqL5DjmsYPHR1Yz74siRQ4ChJqWFosMh/go-block-format"
 
+	pb "github.com/ipfs/go-ipfs/merkledag/pb"
 	node "gx/ipfs/QmPAKbSsgEX5B6fpmxa61jXYnoWzZr5sNafd3qgPiSH8Uv/go-ipld-format"
+	logging "gx/ipfs/QmSpJByNKFX1sCsHBEp3R73FL4NF6FnQTEGyNAXHm2GS52/go-log"
+	ds "gx/ipfs/QmVSase1JP7cq9QkPT46oNwdp9pT6kBkG3oqS14y3QcZjG/go-datastore"
+	ggio "gx/ipfs/QmZ4Qi3GaRbjcx28Sme5eMH7RQjGkt8wHxt2a65oLaeFEV/gogo-protobuf/io"
 	cid "gx/ipfs/Qma4RJSuh7mMeJQYCqMbKzekn6EwBo7HEs5AQYjVRMQATB/go-cid"
 	ipldcbor "gx/ipfs/Qmcdid3XrCxcoNQUqZKiiKtM7JXxtyipU3izyRqwjFbVWw/go-ipld-cbor"
 )
 
+var log = logging.Logger("merkledag")
 var ErrNotFound = fmt.Errorf("merkledag: not found")
 
 // DAGService is an IPFS Merkle DAG service.
 type DAGService interface {
 	Add(node.Node) (*cid.Cid, error)
 	Get(context.Context, *cid.Cid) (node.Node, error)
+	Fetch(context.Context, *cid.Cid) error
 	Remove(node.Node) error
 
 	// GetDAG returns, in order, all the single leve child
@@ -43,8 +51,9 @@ type LinkService interface {
 	GetOfflineLinkService() LinkService
 }
 
-func NewDAGService(bs bserv.BlockService) *dagService {
-	return &dagService{Blocks: bs}
+// NewDAGService is shortcut for creating new dagService
+func NewDAGService(bs bserv.BlockService, d ds.Datastore) *dagService {
+	return &dagService{Blocks: bs, Data: d}
 }
 
 // dagService is an IPFS Merkle DAG service.
@@ -54,6 +63,7 @@ func NewDAGService(bs bserv.BlockService) *dagService {
 //       able to free some of them when vm pressure is high
 type dagService struct {
 	Blocks bserv.BlockService
+	Data   ds.Datastore
 }
 
 // Add adds a node to the dagService, storing the block in the BlockService
@@ -97,6 +107,26 @@ func (n *dagService) Get(ctx context.Context, c *cid.Cid) (node.Node, error) {
 	return decodeBlock(b)
 }
 
+// Fetch ensures node is available in local storage
+func (n *dagService) Fetch(ctx context.Context, c *cid.Cid) error {
+	if n == nil {
+		return fmt.Errorf("dagService is nil")
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	err := n.Blocks.FetchBlock(ctx, c)
+
+	if err != nil {
+		if err == bserv.ErrNotFound {
+			return ErrNotFound
+		}
+		return fmt.Errorf("Failed to get block for %s: %v", c, err)
+	}
+	return nil
+}
+
 func decodeBlock(b blocks.Block) (node.Node, error) {
 	c := b.Cid()
 
@@ -122,23 +152,75 @@ func decodeBlock(b blocks.Block) (node.Node, error) {
 	}
 }
 
+func marshalCachedLinks(ls []*node.Link) []byte {
+	var buffer bytes.Buffer
+
+	pbw := ggio.NewDelimitedWriter(&buffer)
+	for _, l := range ls {
+		pbl := intermediateMarshal(l)
+		pbw.WriteMsg(pbl)
+	}
+	return buffer.Bytes()
+}
+
+func unmarshalCachedLinks(data []byte) ([]*node.Link, error) {
+	var links []*node.Link
+
+	buffer := bytes.NewBuffer(data)
+	pbr := ggio.NewDelimitedReader(buffer, 1024)
+	var pbl pb.PBLink
+	var err error
+	for err = pbr.ReadMsg(&pbl); err == nil; err = pbr.ReadMsg(&pbl) {
+		link, errU := intermediateUnmarshal(&pbl)
+		if errU != nil {
+			return nil, errU
+		}
+		links = append(links, link)
+	}
+	if err != io.EOF {
+		return nil, err
+	}
+	return links, nil
+
+}
+
 // GetLinks return the links for the node, the node doesn't necessarily have
 // to exist locally.
 func (n *dagService) GetLinks(ctx context.Context, c *cid.Cid) ([]*node.Link, error) {
 	if c.Type() == cid.Raw {
 		return nil, nil
 	}
-	node, err := n.Get(ctx, c)
-	if err != nil {
+
+	dKey := ds.NewKey(fmt.Sprint("/local/links/", c.String()))
+	linksI, err := n.Data.Get(dKey)
+	if err == ds.ErrNotFound {
+		node, err := n.Get(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		n.Data.Put(dKey, marshalCachedLinks(node.Links()))
+		return node.Links(), nil
+	} else if err == nil {
+
+		linksRaw, ok := linksI.([]byte)
+		if ok != true {
+			return nil, fmt.Errorf("loading link cache failed: %s was not bytes", dKey)
+		}
+
+		links, err := unmarshalCachedLinks(linksRaw)
+		if err != nil {
+			return nil, err
+		}
+		return links, nil
+	} else {
 		return nil, err
 	}
-	return node.Links(), nil
 }
 
 func (n *dagService) GetOfflineLinkService() LinkService {
 	if n.Blocks.Exchange().IsOnline() {
 		bsrv := bserv.New(n.Blocks.Blockstore(), offline.Exchange(n.Blocks.Blockstore()))
-		return NewDAGService(bsrv)
+		return NewDAGService(bsrv, n.Data)
 	} else {
 		return n
 	}
@@ -179,6 +261,10 @@ func (sg *sesGetter) Get(ctx context.Context, c *cid.Cid) (node.Node, error) {
 
 // FetchGraph fetches all nodes that are children of the given node
 func FetchGraph(ctx context.Context, root *cid.Cid, serv DAGService) error {
+	missing := cid.NewSet()
+	fetchingVisitor := FetchingVisitor(ctx, cid.NewSet(), serv, missing)
+	var result error
+
 	var ng node.NodeGetter = serv
 	ds, ok := serv.(*dagService)
 	if ok {
@@ -186,19 +272,27 @@ func FetchGraph(ctx context.Context, root *cid.Cid, serv DAGService) error {
 	}
 
 	v, _ := ctx.Value("progress").(*ProgressTracker)
+
 	if v == nil {
-		return EnumerateChildrenAsync(ctx, GetLinksDirect(ng), root, cid.NewSet().Visit)
-	}
-	set := cid.NewSet()
-	visit := func(c *cid.Cid) bool {
-		if set.Visit(c) {
-			v.Increment()
-			return true
-		} else {
-			return false
+		result = EnumerateChildrenAsync(ctx, GetLinksDirect(ng), root, fetchingVisitor)
+	} else {
+		visit := func(c *cid.Cid) bool {
+			if fetchingVisitor(c) {
+				v.Increment()
+				return true
+			} else {
+				return false
+			}
+
 		}
+		result = EnumerateChildrenAsync(ctx, GetLinksDirect(ng), root, visit)
 	}
-	return EnumerateChildrenAsync(ctx, GetLinksDirect(ng), root, visit)
+
+	if missing.Len() > 0 && result == nil {
+		return ErrNotFound
+	} else {
+		return result
+	}
 }
 
 // FindLinks searches this nodes links for the given key,
@@ -428,6 +522,26 @@ func (t *Batch) Commit() error {
 
 type GetLinks func(context.Context, *cid.Cid) ([]*node.Link, error)
 
+// FetchingVisitor is helper function used with EnumerateChildren/EnumerateChildrenAsync to fetch all enumerated nodes
+func FetchingVisitor(ctx context.Context, visitation *cid.Set, serv DAGService, missing *cid.Set) func(*cid.Cid) bool {
+
+	var setlk sync.Mutex
+
+	return func(vcid *cid.Cid) bool {
+		err := serv.Fetch(ctx, vcid)
+
+		setlk.Lock()
+		defer setlk.Unlock()
+		if err == nil {
+			return visitation.Visit(vcid)
+		} else {
+			log.Errorf("Error fetching cid %v: %v", vcid, err)
+			missing.Visit(vcid)
+			return visitation.Has(vcid)
+		}
+	}
+}
+
 // EnumerateChildren will walk the dag below the given root node and add all
 // unseen children to the passed in set.
 // TODO: parallelize to avoid disk latency perf hits?
@@ -456,13 +570,11 @@ type ProgressTracker struct {
 func (p *ProgressTracker) DeriveContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, "progress", p)
 }
-
 func (p *ProgressTracker) Increment() {
 	p.lk.Lock()
 	defer p.lk.Unlock()
 	p.Total++
 }
-
 func (p *ProgressTracker) Value() int {
 	p.lk.Lock()
 	defer p.lk.Unlock()
@@ -473,12 +585,12 @@ func (p *ProgressTracker) Value() int {
 // 'fetchNodes' will start at a time
 var FetchGraphConcurrency = 8
 
+// EnumerateChildrenAsync is asynchronous version of EnumerateChildren
+// visit must be thread-safe
 func EnumerateChildrenAsync(ctx context.Context, getLinks GetLinks, c *cid.Cid, visit func(*cid.Cid) bool) error {
 	feed := make(chan *cid.Cid)
-	out := make(chan []*node.Link)
+	out := make(chan []*cid.Cid)
 	done := make(chan struct{})
-
-	var setlk sync.Mutex
 
 	errChan := make(chan error)
 	fetchersCtx, cancel := context.WithCancel(ctx)
@@ -488,19 +600,21 @@ func EnumerateChildrenAsync(ctx context.Context, getLinks GetLinks, c *cid.Cid, 
 	for i := 0; i < FetchGraphConcurrency; i++ {
 		go func() {
 			for ic := range feed {
-				links, err := getLinks(ctx, ic)
-				if err != nil {
-					errChan <- err
-					return
-				}
-
-				setlk.Lock()
 				unseen := visit(ic)
-				setlk.Unlock()
 
 				if unseen {
+					links, err := getLinks(fetchersCtx, ic)
+					if err != nil {
+						errChan <- err
+						cancel()
+						return
+					}
+					cids := make([]*cid.Cid, len(links))
+					for i, l := range links {
+						cids[i] = l.Cid
+					}
 					select {
-					case out <- links:
+					case out <- cids:
 					case <-fetchersCtx.Done():
 						return
 					}
@@ -535,13 +649,14 @@ func EnumerateChildrenAsync(ctx context.Context, getLinks GetLinks, c *cid.Cid, 
 			if inProgress == 0 && next == nil {
 				return nil
 			}
-		case links := <-out:
-			for _, lnk := range links {
+		case cids := <-out:
+			if len(cids) > 0 {
 				if next == nil {
-					next = lnk.Cid
+					next = cids[0]
+					todobuffer = append(todobuffer, cids[1:]...)
 					send = feed
 				} else {
-					todobuffer = append(todobuffer, lnk.Cid)
+					todobuffer = append(todobuffer, cids...)
 				}
 			}
 		case err := <-errChan:

@@ -378,8 +378,7 @@ func provideKeysRec(ctx context.Context, r routing.IpfsRouting, dserv dag.DAGSer
 	provided := cid.NewSet()
 	for _, c := range cids {
 		kset := cid.NewSet()
-
-		err := dag.EnumerateChildrenAsync(ctx, dag.GetLinksDirect(dserv), c, kset.Visit)
+		err := dag.EnumerateChildrenAsync(ctx, dag.GetLinksDirect(dserv), c, dag.FetchingVisitor(ctx, kset, dserv, cid.NewSet()))
 		if err != nil {
 			return err
 		}

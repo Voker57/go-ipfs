@@ -22,6 +22,8 @@ import (
 	"github.com/ipfs/go-ipfs/thirdparty/testutil"
 	"gx/ipfs/QmXxGS5QsUxpR3iqL5DjmsYPHR1Yz74siRQ4ChJqWFosMh/go-block-format"
 
+	ds "gx/ipfs/QmVSase1JP7cq9QkPT46oNwdp9pT6kBkG3oqS14y3QcZjG/go-datastore"
+	syncds "gx/ipfs/QmVSase1JP7cq9QkPT46oNwdp9pT6kBkG3oqS14y3QcZjG/go-datastore/sync"
 	cid "gx/ipfs/Qma4RJSuh7mMeJQYCqMbKzekn6EwBo7HEs5AQYjVRMQATB/go-cid"
 )
 
@@ -148,8 +150,9 @@ func TestAddGCLive(t *testing.T) {
 	defer cancel()
 
 	set := cid.NewSet()
-	err = dag.EnumerateChildren(ctx, node.DAG.GetLinks, last, set.Visit)
-	if err != nil {
+	missing := cid.NewSet()
+	err = dag.EnumerateChildren(ctx, node.DAG.GetLinks, last, dag.FetchingVisitor(ctx, set, node.DAG, missing))
+	if err != nil || missing.Len() > 0 {
 		t.Fatal(err)
 	}
 }
@@ -170,7 +173,7 @@ func testAddWPosInfo(t *testing.T, rawLeaves bool) {
 
 	bs := &testBlockstore{GCBlockstore: node.Blockstore, expectedPath: "/tmp/foo.txt", t: t}
 	bserv := blockservice.New(bs, node.Exchange)
-	dserv := dag.NewDAGService(bserv)
+	dserv := dag.NewDAGService(bserv, syncds.MutexWrap(ds.NewMapDatastore()))
 	adder, err := NewAdder(context.Background(), node.Pinning, bs, dserv)
 	if err != nil {
 		t.Fatal(err)
