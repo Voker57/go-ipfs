@@ -140,7 +140,7 @@ func (n *dagService) Remove(nd node.Node) error {
 
 // FetchGraph fetches all nodes that are children of the given node
 func FetchGraph(ctx context.Context, c *cid.Cid, serv DAGService) error {
-	return EnumerateChildren(ctx, serv, c, cid.NewSet().Visit, false)
+	return EnumerateChildrenAsync(ctx, serv, c, cid.NewSet().Visit)
 }
 
 // FindLinks searches this nodes links for the given key,
@@ -160,38 +160,64 @@ type NodeOption struct {
 	Err  error
 }
 
+var GetManyConcurrency = 8
+
 func (ds *dagService) GetMany(ctx context.Context, keys []*cid.Cid) <-chan *NodeOption {
 	out := make(chan *NodeOption, len(keys))
 	blocks := ds.Blocks.GetBlocks(ctx, keys)
 	var count int
-
-	go func() {
-		defer close(out)
+	wg := sync.WaitGroup{}
+	done := make(chan interface{})
+	var closeOnce sync.Once
+	closeDone := func() { closeOnce.Do(func(){close(done)}) }
+	
+	blockDecoder := func() {
+		defer wg.Done()
 		for {
 			select {
 			case b, ok := <-blocks:
+// 				log.Error("got blocks")
 				if !ok {
-					if count != len(keys) {
-						out <- &NodeOption{Err: fmt.Errorf("failed to fetch all nodes")}
-					}
+// 					log.Error("not ok")
 					return
 				}
 
 				nd, err := decodeBlock(b)
 				if err != nil {
+// 					log.Error("err")
 					out <- &NodeOption{Err: err}
+					closeDone()
 					return
 				}
 
+// 				log.Error("pushing")
 				out <- &NodeOption{Node: nd}
 				count++
-
+			case <-done:
+// 				log.Error("done so soon?")
+				return
 			case <-ctx.Done():
 				out <- &NodeOption{Err: ctx.Err()}
+				closeDone()
 				return
 			}
 		}
+	}
+	
+	for i := 0; i < GetManyConcurrency; i++ {
+		wg.Add(1)
+		go blockDecoder()
+	}
+// 	log.Error("go smth")
+	go func() {
+		wg.Wait()
+		if count != len(keys) {
+			out <- &NodeOption{Err: fmt.Errorf("failed to fetch all nodes")}
+		}
+		close(out)
 	}()
+	
+// 	log.Error("returning from getmany")
 	return out
 }
 
@@ -403,78 +429,57 @@ func EnumerateChildrenAsync(ctx context.Context, ds DAGService, c *cid.Cid, visi
 		return err
 	}
 
-	feed := make(chan node.Node)
-	out := make(chan *NodeOption)
-	done := make(chan struct{})
+	feed := make(chan []*cid.Cid, FetchGraphConcurrency * 2)
 
 	var setlk sync.Mutex
-
+	var inProgress int
+	feed <- []*cid.Cid{root.Cid()}
+	inProgress = 1
+	wg := sync.WaitGroup{}
+	
 	for i := 0; i < FetchGraphConcurrency; i++ {
+		wg.Add(1)
 		go func() {
-			for n := range feed {
-				links := n.Links()
-				cids := make([]*cid.Cid, 0, len(links))
-				for _, l := range links {
-					setlk.Lock()
-					unseen := visit(l.Cid)
-					setlk.Unlock()
-					if unseen {
-						cids = append(cids, l.Cid)
-					}
-				}
-
-				for nopt := range ds.GetMany(ctx, cids) {
-					select {
-					case out <- nopt:
-					case <-ctx.Done():
+			defer wg.Done()
+			for cids := range feed {
+// 				log.Error("got cids")
+				var nextCids []*cid.Cid 
+				for no := range ds.GetMany(ctx, cids) {
+// 					log.Error("got a node")
+					if no.Err != nil {
+// 						log.Errorf("eek, an error! %v", no.Err)
+						close(feed)
 						return
 					}
+					n := no.Node
+					for _, l := range n.Links() {
+// 						log.Error("linky")
+						setlk.Lock()
+						unseen := visit(l.Cid)
+						setlk.Unlock()
+						if unseen {
+// 							log.Error("unseen")
+							nextCids = append(nextCids, l.Cid)
+							inProgress++
+						}
+					}
+					inProgress--
 				}
-				select {
-				case done <- struct{}{}:
-				case <-ctx.Done():
+				
+// 				log.Errorf("feeding %d cids", len(nextCids))
+				if len(nextCids) > 0 {
+					
+					feed <- nextCids
+				}
+				
+				if inProgress == 0 {
+					close(feed)
 				}
 			}
 		}()
 	}
-	defer close(feed)
 
-	send := feed
-	var todobuffer []node.Node
-	var inProgress int
-
-	next := root
-	for {
-		select {
-		case send <- next:
-			inProgress++
-			if len(todobuffer) > 0 {
-				next = todobuffer[0]
-				todobuffer = todobuffer[1:]
-			} else {
-				next = nil
-				send = nil
-			}
-		case <-done:
-			inProgress--
-			if inProgress == 0 && next == nil {
-				return nil
-			}
-		case nc := <-out:
-			if nc.Err != nil {
-				return nc.Err
-			}
-
-			if next == nil {
-				next = nc.Node
-				send = feed
-			} else {
-				todobuffer = append(todobuffer, nc.Node)
-			}
-
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
+	
+	wg.Wait()
+	return nil
 }
