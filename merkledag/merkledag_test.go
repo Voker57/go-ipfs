@@ -27,6 +27,8 @@ import (
 	cid "gx/ipfs/QmNp85zy9RLrQ5oQD4hPyS39ezrrXpcaa7R4Y9kxdWQLLQ/go-cid"
 	node "gx/ipfs/QmPN7cwmpcc4DWXb4KTB9dNAJgjuPY69h3npsMfhRrQL9c/go-ipld-format"
 	u "gx/ipfs/QmSU6eubNdhXjFBJBSksTp8kv8YRub8mGAPv8tVJHmL2EU/go-ipfs-util"
+	ds "gx/ipfs/QmVSase1JP7cq9QkPT46oNwdp9pT6kBkG3oqS14y3QcZjG/go-datastore"
+	syncds "gx/ipfs/QmVSase1JP7cq9QkPT46oNwdp9pT6kBkG3oqS14y3QcZjG/go-datastore/sync"
 )
 
 func TestNode(t *testing.T) {
@@ -133,7 +135,7 @@ func runBatchFetchTest(t *testing.T, read io.Reader) {
 	ctx := context.Background()
 	var dagservs []DAGService
 	for _, bsi := range bstest.Mocks(5) {
-		dagservs = append(dagservs, NewDAGService(bsi))
+		dagservs = append(dagservs, NewDAGService(bsi, syncds.MutexWrap(ds.NewMapDatastore())))
 	}
 
 	spl := chunk.NewSizeSplitter(read, 512)
@@ -224,7 +226,7 @@ func TestFetchGraph(t *testing.T) {
 	var dservs []DAGService
 	bsis := bstest.Mocks(2)
 	for _, bsi := range bsis {
-		dservs = append(dservs, NewDAGService(bsi))
+		dservs = append(dservs, NewDAGService(bsi, syncds.MutexWrap(ds.NewMapDatastore())))
 	}
 
 	read := io.LimitReader(u.NewTimeSeededRand(), 1024*32)
@@ -241,9 +243,9 @@ func TestFetchGraph(t *testing.T) {
 	// create an offline dagstore and ensure all blocks were fetched
 	bs := bserv.New(bsis[1].Blockstore(), offline.Exchange(bsis[1].Blockstore()))
 
-	offline_ds := NewDAGService(bs)
+	offlineDs := NewDAGService(bs, syncds.MutexWrap(ds.NewMapDatastore()))
 
-	err = EnumerateChildren(context.Background(), offline_ds.GetLinks, root.Cid(), func(_ *cid.Cid) bool { return true })
+	err = EnumerateChildren(context.Background(), offlineDs.GetLinks, root.Cid(), OnceVisitor(cid.NewSet()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +253,7 @@ func TestFetchGraph(t *testing.T) {
 
 func TestEnumerateChildren(t *testing.T) {
 	bsi := bstest.Mocks(1)
-	ds := NewDAGService(bsi[0])
+	ds := NewDAGService(bsi[0], syncds.MutexWrap(ds.NewMapDatastore()))
 
 	read := io.LimitReader(u.NewTimeSeededRand(), 1024*1024)
 	root, err := imp.BuildDagFromReader(ds, chunk.NewSizeSplitter(read, 512))
@@ -260,7 +262,7 @@ func TestEnumerateChildren(t *testing.T) {
 	}
 
 	set := cid.NewSet()
-	err = EnumerateChildren(context.Background(), ds.GetLinks, root.Cid(), set.Visit)
+	err = EnumerateChildren(context.Background(), ds.GetLinks, root.Cid(), FetchingVisitor(context.Background(), set, ds))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +473,7 @@ func TestCidRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ds := NewDAGService(bs)
+	ds := NewDAGService(bs, syncds.MutexWrap(ds.NewMapDatastore()))
 	out, err := ds.Get(context.Background(), c2)
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +485,7 @@ func TestCidRetention(t *testing.T) {
 }
 
 func TestCidRawDoesnNeedData(t *testing.T) {
-	srv := NewDAGService(dstest.Bserv())
+	srv := NewDAGService(dstest.Bserv(), syncds.MutexWrap(ds.NewMapDatastore()))
 	nd := NewRawNode([]byte("somedata"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -506,7 +508,7 @@ func TestEnumerateAsyncFailsNotFound(t *testing.T) {
 	c := NodeWithData([]byte("foo3"))
 	d := NodeWithData([]byte("foo4"))
 
-	ds := dstest.Mock()
+	ds := NewDAGService(dstest.Bserv(), syncds.MutexWrap(ds.NewMapDatastore()))
 	for _, n := range []node.Node{a, b, c} {
 		_, err := ds.Add(n)
 		if err != nil {
@@ -536,8 +538,7 @@ func TestEnumerateAsyncFailsNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cset := cid.NewSet()
-	err = EnumerateChildrenAsync(context.Background(), GetLinksDirect(ds), pcid, cset.Visit)
+	err = EnumerateChildrenAsync(context.Background(), ds.GetLinks, pcid, FetchingVisitor(context.Background(), cid.NewSet(), ds))
 	if err == nil {
 		t.Fatal("this should have failed")
 	}

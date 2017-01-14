@@ -227,13 +227,14 @@ You can now refer to the added file in a gateway, like so:
 		}
 
 		exch := n.Exchange
+
 		local, _, _ := req.Option("local").Bool()
 		if local {
 			exch = offline.Exchange(addblockstore)
 		}
 
 		bserv := blockservice.New(addblockstore, exch)
-		dserv := dag.NewDAGService(bserv)
+		dserv := dag.NewDAGService(bserv, n.Repo.Datastore())
 
 		fileAdder, err := coreunix.NewAdder(req.Context(), n.Pinning, n.Blockstore, dserv)
 		if err != nil {
