@@ -57,7 +57,7 @@ func Pin(n *core.IpfsNode, ctx context.Context, paths []string, recursive bool) 
 	return out, nil
 }
 
-func Unpin(n *core.IpfsNode, ctx context.Context, paths []string, recursive bool) ([]*cid.Cid, error) {
+func Unpin(n *core.IpfsNode, ctx context.Context, paths []string, recursive bool, explain bool) ([]*cid.Cid, error) {
 	unpinned := make([]*cid.Cid, len(paths))
 
 	r := &path.Resolver{
@@ -76,7 +76,7 @@ func Unpin(n *core.IpfsNode, ctx context.Context, paths []string, recursive bool
 			return nil, err
 		}
 
-		err = n.Pinning.Unpin(ctx, k, recursive)
+		err = n.Pinning.Unpin(ctx, k, recursive, explain)
 		if err != nil {
 			return nil, err
 		}

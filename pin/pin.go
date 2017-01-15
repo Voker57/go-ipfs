@@ -85,7 +85,7 @@ type Pinner interface {
 	IsPinned(*cid.Cid) (string, bool, error)
 	IsPinnedWithType(*cid.Cid, PinMode) (string, bool, error)
 	Pin(context.Context, node.Node, bool) error
-	Unpin(context.Context, *cid.Cid, bool) error
+	Unpin(context.Context, *cid.Cid, bool, bool) error
 
 	// Update updates a recursive pin from one cid to another
 	// this is more efficient than simply pinning the new one and unpinning the
@@ -210,30 +210,58 @@ func (p *pinner) Pin(ctx context.Context, node node.Node, recurse bool) error {
 var ErrNotPinned = fmt.Errorf("not pinned")
 
 // Unpin a given key
-func (p *pinner) Unpin(ctx context.Context, c *cid.Cid, recursive bool) error {
+func (p *pinner) Unpin(ctx context.Context, c *cid.Cid, recursive bool, explain bool) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
-	reason, pinned, err := p.isPinnedWithType(c, Any)
+	var pinMode PinMode
+	if recursive {
+		pinMode = Recursive
+	} else {
+		pinMode = Direct
+	}
+	_, pinned, err := p.isPinnedWithType(c, pinMode)
 	if err != nil {
 		return err
 	}
-	if !pinned {
-		return ErrNotPinned
-	}
-	switch reason {
-	case "recursive":
+	if pinned {
 		if recursive {
 			p.recursePin.Remove(c)
 			return nil
 		} else {
-			return fmt.Errorf("%s is pinned recursively", c)
+			p.directPin.Remove(c)
+			return nil
 		}
-	case "direct":
-		p.directPin.Remove(c)
-		return nil
-	default:
-		return fmt.Errorf("%s is pinned indirectly under %s", c, reason)
+	} else if recursive {
+		_, pinned, err := p.isPinnedWithType(c, Direct)
+		if err != nil {
+			return err
+		}
+		if pinned {
+			p.directPin.Remove(c)
+			return nil
+		}
 	}
+
+	if explain {
+		reason, pinned, err := p.isPinnedWithType(c, Any)
+		if err != nil {
+			return err
+		}
+		if !pinned {
+			return ErrNotPinned
+		}
+		switch reason {
+		case "recursive":
+			return fmt.Errorf("%s is pinned recursively", c)
+		default:
+			return fmt.Errorf("%s is pinned indirectly under %s", c, reason)
+		}
+	} else if recursive {
+		return fmt.Errorf("%s is not pinned recursively or directly", c)
+	} else {
+		return fmt.Errorf("%s is not pinned directly", c)
+	}
+
 }
 
 func (p *pinner) isInternalPin(c *cid.Cid) bool {
