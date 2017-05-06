@@ -85,7 +85,7 @@ type Pinner interface {
 	IsPinned(*cid.Cid) (string, bool, error)
 	IsPinnedWithType(*cid.Cid, PinMode) (string, bool, error)
 	Pin(context.Context, node.Node, bool) error
-	Unpin(context.Context, *cid.Cid, bool, bool) error
+	Unpin(ctx context.Context, c *cid.Cid, recursive bool, explain bool) error
 
 	// Update updates a recursive pin from one cid to another
 	// this is more efficient than simply pinning the new one and unpinning the
