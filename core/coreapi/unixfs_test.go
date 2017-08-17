@@ -74,7 +74,7 @@ func makeAPIIdent(ctx context.Context, fullIdentity bool) (*core.IpfsNode, corei
 	if err != nil {
 		return nil, nil, err
 	}
-	api := coreapi.NewCoreAPI(node)
+	api := coreapi.NewCoreAPI(node, false)
 	return node, api, nil
 }
 
