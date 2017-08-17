@@ -5,6 +5,7 @@ import (
 
 	core "github.com/ipfs/go-ipfs/core"
 	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
+	mdag "github.com/ipfs/go-ipfs/merkledag"
 	ipfspath "github.com/ipfs/go-ipfs/path"
 	uio "github.com/ipfs/go-ipfs/unixfs/io"
 
@@ -13,10 +14,17 @@ import (
 
 type CoreAPI struct {
 	node *core.IpfsNode
+	dag  mdag.DAGService
 }
 
-func NewCoreAPI(n *core.IpfsNode) coreiface.CoreAPI {
-	api := &CoreAPI{n}
+func NewCoreAPI(n *core.IpfsNode, offlineMode bool) coreiface.CoreAPI {
+	var dag mdag.DAGService
+	if offlineMode {
+		dag = n.InternalDag
+	} else {
+		dag = n.DAG
+	}
+	api := &CoreAPI{n, dag}
 	return api
 }
 
@@ -30,7 +38,7 @@ func (api *CoreAPI) ResolveNode(ctx context.Context, p coreiface.Path) (coreifac
 		return nil, err
 	}
 
-	node, err := api.node.DAG.Get(ctx, p.Cid())
+	node, err := api.dag.Get(ctx, p.Cid())
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +52,7 @@ func (api *CoreAPI) ResolvePath(ctx context.Context, p coreiface.Path) (coreifac
 	}
 
 	r := &ipfspath.Resolver{
-		DAG:         api.node.DAG,
+		DAG:         api.dag,
 		ResolveOnce: uio.ResolveUnixfsOnce,
 	}
 
