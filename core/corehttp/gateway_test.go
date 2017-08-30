@@ -100,6 +100,12 @@ func newTestServerAndNode(t *testing.T, ns mockNamesys) (*httptest.Server, *core
 	}
 	cfg.Gateway.PathPrefixes = []string{"/good-prefix"}
 
+	gwCfg, err := ConfigFromNode(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gwCfg.Writable = false
+
 	// need this variable here since we need to construct handler with
 	// listener, and server with handler. yay cycles.
 	dh := &delegatedHandler{}
@@ -109,7 +115,7 @@ func newTestServerAndNode(t *testing.T, ns mockNamesys) (*httptest.Server, *core
 		ts.Listener,
 		VersionOption(),
 		IPNSHostnameOption(),
-		GatewayOption(false, "/ipfs", "/ipns"),
+		GatewayOption(*gwCfg, "/ipfs", "/ipns"),
 	)
 	if err != nil {
 		t.Fatal(err)
