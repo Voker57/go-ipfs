@@ -453,9 +453,21 @@ func serveHTTPApi(req cmds.Request) (error, <-chan error) {
 	if err != nil {
 		return fmt.Errorf("serveHTTPApi: Option(%s) failed: %s", unrestrictedApiAccessKwd, err), nil
 	}
-	gatewayOpt := corehttp.GatewayOption(false, corehttp.WebUIPaths...)
+
+	node, err := req.InvocContext().ConstructNode()
+	if err != nil {
+		return fmt.Errorf("serveHTTPApi: ConstructNode() failed: %s", err), nil
+	}
+
+	gwCfg, err := corehttp.ConfigFromNode(node)
+	if err != nil {
+		return err, nil
+	}
+	gwCfg.Writable = false
+	gatewayOpt := corehttp.GatewayOption(*gwCfg, corehttp.WebUIPaths...)
 	if unrestricted {
-		gatewayOpt = corehttp.GatewayOption(true, "/ipfs", "/ipns")
+		gwCfg.Writable = true
+		gatewayOpt = corehttp.GatewayOption(*gwCfg, "/ipfs", "/ipns")
 	}
 
 	var opts = []corehttp.ServeOption{
@@ -472,11 +484,6 @@ func serveHTTPApi(req cmds.Request) (error, <-chan error) {
 
 	if len(cfg.Gateway.RootRedirect) > 0 {
 		opts = append(opts, corehttp.RedirectOption("", cfg.Gateway.RootRedirect))
-	}
-
-	node, err := req.InvocContext().ConstructNode()
-	if err != nil {
-		return fmt.Errorf("serveHTTPApi: ConstructNode() failed: %s", err), nil
 	}
 
 	if err := node.Repo.SetAPIAddr(apiMaddr); err != nil {
@@ -555,21 +562,27 @@ func serveHTTPGateway(req cmds.Request) (error, <-chan error) {
 		fmt.Printf("Gateway (readonly) server listening on %s\n", gatewayMaddr)
 	}
 
+	node, err := req.InvocContext().ConstructNode()
+	if err != nil {
+		return fmt.Errorf("serveHTTPGateway: ConstructNode() failed: %s", err), nil
+	}
+
+	gwCfg, err := corehttp.ConfigFromNode(node)
+	if err != nil {
+		return err, nil
+	}
+	gwCfg.Writable = writable
+
 	var opts = []corehttp.ServeOption{
 		corehttp.MetricsCollectionOption("gateway"),
 		corehttp.CommandsROOption(*req.InvocContext()),
 		corehttp.VersionOption(),
 		corehttp.IPNSHostnameOption(),
-		corehttp.GatewayOption(writable, "/ipfs", "/ipns"),
+		corehttp.GatewayOption(*gwCfg, "/ipfs", "/ipns"),
 	}
 
 	if len(cfg.Gateway.RootRedirect) > 0 {
 		opts = append(opts, corehttp.RedirectOption("", cfg.Gateway.RootRedirect))
-	}
-
-	node, err := req.InvocContext().ConstructNode()
-	if err != nil {
-		return fmt.Errorf("serveHTTPGateway: ConstructNode() failed: %s", err), nil
 	}
 
 	errc := make(chan error)
