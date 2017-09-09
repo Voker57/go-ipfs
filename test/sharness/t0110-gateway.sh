@@ -195,4 +195,30 @@ test_expect_success "GET compact blocks succeeds" '
 
 test_kill_ipfs_daemon
 
+test_expect_success "set FetchBlocks to false in config" '
+  ipfs config --bool=false Gateway.FetchBlocks
+'
+
+test_launch_ipfs_daemon
+
+port=$GWAY_PORT
+apiport=$API_PORT
+
+test_expect_success "try fetching not present key from offline gateway" '
+  echo "hi" | ipfs add --hash-only -Q > hi.hash
+  test_expect_code 22 curl -f "http://127.0.0.1:$port/ipfs/$(cat hi.hash)"
+'
+
+test_expect_success "try fetching present key from offline gateway" '
+  echo "hi" | ipfs add -Q > hi.hash &&
+  echo "http://127.0.0.1:$port/ipfs/$(cat hi.hash)" &&
+  curl -f "http://127.0.0.1:$port/ipfs/$(cat hi.hash)"
+'
+
+test_kill_ipfs_daemon
+
+test_expect_success "set FetchBlocks to true in config" '
+  ipfs config --bool=true Gateway.FetchBlocks
+'
+
 test_done
