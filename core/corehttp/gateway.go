@@ -14,6 +14,7 @@ import (
 type GatewayConfig struct {
 	Headers      map[string][]string
 	Writable     bool
+	FetchBlocks  bool
 	PathPrefixes []string
 }
 
@@ -25,13 +26,14 @@ func ConfigFromNode(n *core.IpfsNode) (*GatewayConfig, error) {
 	gc := &GatewayConfig{
 		Headers:      cfg.Gateway.HTTPHeaders,
 		PathPrefixes: cfg.Gateway.PathPrefixes,
+		FetchBlocks:  cfg.Gateway.FetchBlocks,
 	}
 	return gc, nil
 }
 
 func GatewayOption(gc GatewayConfig, paths ...string) ServeOption {
 	return func(n *core.IpfsNode, _ net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
-		gateway := newGatewayHandler(n, gc, coreapi.NewCoreAPI(n))
+		gateway := newGatewayHandler(n, gc, coreapi.NewCoreAPI(n, !gc.FetchBlocks))
 
 		for _, p := range paths {
 			mux.Handle(p+"/", gateway)
