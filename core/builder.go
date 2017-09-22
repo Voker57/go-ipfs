@@ -220,14 +220,14 @@ func setupNode(ctx context.Context, n *IpfsNode, cfg *BuildCfg) error {
 	n.Blocks = bserv.New(n.Blockstore, n.Exchange)
 	n.DAG = dag.NewDAGService(n.Blocks, n.Repo.Datastore())
 
-	internalDag := dag.NewDAGService(bserv.New(n.Blockstore, offline.Exchange(n.Blockstore)), n.Repo.Datastore())
-	n.Pinning, err = pin.LoadPinner(n.Repo.Datastore(), n.DAG, internalDag)
+	n.InternalDag = dag.NewDAGService(bserv.New(n.Blockstore, offline.Exchange(n.Blockstore)), n.Repo.Datastore())
+	n.Pinning, err = pin.LoadPinner(n.Repo.Datastore(), n.DAG, n.InternalDag)
 	if err != nil {
 		// TODO: we should move towards only running 'NewPinner' explicity on
 		// node init instead of implicitly here as a result of the pinner keys
 		// not being found in the datastore.
 		// this is kinda sketchy and could cause data loss
-		n.Pinning = pin.NewPinner(n.Repo.Datastore(), n.DAG, internalDag)
+		n.Pinning = pin.NewPinner(n.Repo.Datastore(), n.DAG, n.InternalDag)
 	}
 	n.Resolver = path.NewBasicResolver(n.DAG)
 
