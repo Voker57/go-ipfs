@@ -197,7 +197,7 @@ func (adder *Adder) PinRoot() error {
 	}
 
 	if adder.tempRoot != nil {
-		err := adder.pinning.Unpin(adder.ctx, adder.tempRoot, true)
+		err := adder.pinning.Unpin(adder.ctx, adder.tempRoot, true, false)
 		if err != nil {
 			return err
 		}
